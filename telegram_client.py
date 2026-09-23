@@ -361,8 +361,9 @@ def format_messages_page(sender_id, title="المحادثة"):
 
     res = f"📚 {title} (صفحة {page + 1}):\n\n"
     for idx, m in enumerate(page_msgs, 1):
-        prev = m['text'][:50].replace('\n', ' ')
-        res += f"{idx}. {prev}\n"
-    res += "\nأرسل:\n- `/open 1` أو `/فتح 1`\n- `/next` أو `/التالي`\n- `/prev` أو `/السابق`"
+        # تقطيع مقتطف الرسالة إلى 35 حرفاً فقط لتجنب تجاوز الحد
+        prev = m['text'][:35].replace('\n', ' ')
+        res += f"{idx}. {prev}...\n"
+    res += "\nأرسل:\n- `/open 1` لقراءة الرسالة كاملة\n- `/next` للتالي | `/prev` للسابق"
     return res
         
