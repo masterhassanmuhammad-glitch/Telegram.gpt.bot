@@ -5,7 +5,7 @@ import asyncio
 import threading
 
 # ============================================================
-# 1. إعداد Event Loop الخيط الرئيسي قبل استيراد Pyrogram
+# 1. إعداد الـ Event Loop قبل استيراد Pyrogram لتفادي الأخطاء
 # ============================================================
 try:
     loop = asyncio.get_event_loop()
@@ -14,7 +14,7 @@ except RuntimeError:
     asyncio.set_event_loop(loop)
 
 # ============================================================
-# 2. استيراد Pyrogram بأمان بعد تجهيز الـ Loop
+# 2. استيراد Pyrogram
 # ============================================================
 from pyrogram import Client
 from pyrogram.enums import ChatType
@@ -26,6 +26,8 @@ TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
 TG_SESSION = os.getenv("TELEGRAM_SESSION", "").strip()
 
 tg_app = None
+telegram_ready = False
+telegram_error = ""
 
 # ============================================================
 # 3. تشغيل عميل Telegram في الخلفية
@@ -41,16 +43,24 @@ if TG_API_ID and TG_API_HASH and TG_SESSION:
         )
 
         def start_telegram_loop():
+            global telegram_ready, telegram_error
             asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(tg_app.start())
+                telegram_ready = True
+                print("✅ TELEGRAM CLIENT CONNECTED SUCCESSFULLY!")
                 loop.run_forever()
             except Exception as e:
-                print("TELEGRAM CLIENT START ERROR:", repr(e))
+                telegram_ready = False
+                telegram_error = str(e)
+                print("❌ TELEGRAM CLIENT START ERROR:", repr(e))
 
         threading.Thread(target=start_telegram_loop, daemon=True).start()
     except Exception as e:
-        print("TELEGRAM INIT ERROR:", repr(e))
+        telegram_error = str(e)
+        print("❌ TELEGRAM INIT ERROR:", repr(e))
+else:
+    telegram_error = "متغيرات البيئة (TG_API_ID, TG_API_HASH, TELEGRAM_SESSION) غير مكتملة."
 
 user_states = {}
 PAGE_SIZE = 5
@@ -71,9 +81,16 @@ def get_user_state(sender_id):
 
 
 def run_async(coro):
-    if not tg_app or not loop.is_running():
-        raise RuntimeError("حساب Telegram غير متصل أو لم يبدأ بعد.")
-    return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=15)
+    if not tg_app or not loop.is_running() or not telegram_ready:
+        coro.close()  # إغلاق Coroutine لمنع ظهور تحذير RuntimeWarning
+        err_msg = telegram_error if telegram_error else "جاري الاتصال بتليجرام..."
+        raise RuntimeError(f"حساب Telegram غير متصل. السبب: {err_msg}")
+    try:
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=15)
+    except Exception as e:
+        coro.close()
+        raise e
 
 
 async def async_get_dialogs(dialog_type="channels"):
@@ -144,8 +161,9 @@ def is_telegram_command(text):
 
 
 def handle_telegram_command(sender_id, text, gemini_response_fn):
-    if not tg_app:
-        return "⚠️ حساب Telegram غير مفعل. يرجى التأكد من ضبط متغيرات الجلسة (TG_API_ID, TG_API_HASH, TELEGRAM_SESSION)."
+    if not tg_app or not telegram_ready:
+        err_details = telegram_error if telegram_error else "جاري الاتصال بالتليجرام..."
+        return f"⚠️ حساب Telegram غير متصل حالياً.\nالسبب: {err_details}"
 
     state = get_user_state(sender_id)
     raw_cmd = text.strip()
