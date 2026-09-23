@@ -7,7 +7,33 @@ import requests
 import threading
 
 from flask import Flask, request
-import google.generativeai as genai
+
+# ملاحظة: لا نستورد google.generativeai هنا في الأعلى.
+# هذه المكتبة (وتوابعها: grpcio, google-auth, ...) ثقيلة على الذاكرة،
+# واستيرادها عند بدء التشغيل مباشرة قد يتسبب في تجاوز حد الذاكرة
+# على الخطط المجانية ويؤدي إلى "Application exited early".
+# لذلك يتم استيرادها فقط عند أول استخدام فعلي (lazy import) داخل
+# generate_gemini_response().
+genai = None
+_genai_lock = threading.Lock()
+
+
+def get_genai():
+    """يستورد ويهيئ مكتبة google.generativeai عند أول حاجة فعلية لها فقط."""
+
+    global genai
+
+    if genai is None:
+
+        with _genai_lock:
+
+            if genai is None:
+
+                import google.generativeai as _genai
+
+                genai = _genai
+
+    return genai
 
 
 # ============================================================
@@ -727,12 +753,14 @@ def generate_gemini_response(
 
     try:
 
+        gen_ai_module = get_genai()
+
         # تهيئة Gemini بالمفتاح المختار
-        genai.configure(
+        gen_ai_module.configure(
             api_key=api_key
         )
 
-        model = genai.GenerativeModel(
+        model = gen_ai_module.GenerativeModel(
             "gemini-3.5-flash-lite"
         )
 
@@ -1018,4 +1046,190 @@ def handle_messages():
             )
 
             # ------------------------------------------------
-            # Process all current
+            # Process all current attachments
+            # (images, audio, video, files: pdf/docx/pptx/xlsx/txt)
+            # ------------------------------------------------
+
+            processed_attachments = []
+
+            attachment_summaries = []
+
+            for attachment in attachments:
+
+                result = process_attachment(
+                    attachment
+                )
+
+                if result is None:
+
+                    continue
+
+                processed_attachments.append(
+                    result
+                )
+
+                if result["kind"] == "native":
+
+                    attachment_summaries.append(
+                        result["mime_type"]
+                    )
+
+                elif result["kind"] == "text":
+
+                    attachment_summaries.append(
+                        result.get(
+                            "label",
+                            "text file"
+                        )
+                    )
+
+                elif result["kind"] == "unsupported":
+
+                    attachment_summaries.append(
+                        "unsupported: "
+                        + result.get(
+                            "label",
+                            ""
+                        )
+                    )
+
+            # ------------------------------------------------
+            # Ignore empty events
+            # ------------------------------------------------
+
+            if (
+                not user_text
+                and not processed_attachments
+            ):
+
+                continue
+
+            print(
+                "================================"
+            )
+
+            print(
+                "SENDER:",
+                sender_id
+            )
+
+            print(
+                "TEXT:",
+                user_text
+            )
+
+            print(
+                "ATTACHMENTS:",
+                attachment_summaries
+            )
+
+            # ------------------------------------------------
+            # Clean memory
+            # ------------------------------------------------
+
+            clean_memory(
+                sender_id
+            )
+
+            # ------------------------------------------------
+            # Gemini
+            # ------------------------------------------------
+
+            reply_text = generate_gemini_response(
+
+                sender_id=sender_id,
+
+                user_text=user_text,
+
+                processed_attachments=processed_attachments
+
+            )
+
+            # ------------------------------------------------
+            # Save user text only (files are not kept in memory)
+            # ------------------------------------------------
+
+            if user_text:
+
+                add_to_memory(
+
+                    sender_id,
+
+                    "user",
+
+                    user_text
+
+                )
+
+            elif processed_attachments:
+
+                add_to_memory(
+
+                    sender_id,
+
+                    "user",
+
+                    "[أرسل المستخدم ملف/ملفات: {}]".format(
+                        ", ".join(
+                            attachment_summaries
+                        )
+                    )
+
+                )
+
+            # ------------------------------------------------
+            # Save Gemini response
+            # ------------------------------------------------
+
+            add_to_memory(
+
+                sender_id,
+
+                "model",
+
+                reply_text
+
+            )
+
+            # ------------------------------------------------
+            # Free memory of file bytes
+            # ------------------------------------------------
+
+            processed_attachments = None
+
+            # ------------------------------------------------
+            # Send reply
+            # ------------------------------------------------
+
+            send_facebook_message(
+
+                sender_id,
+
+                reply_text
+
+            )
+
+    return (
+        "EVENT_RECEIVED",
+        200
+    )
+
+
+# ============================================================
+# Main
+# ============================================================
+
+if __name__ == "__main__":
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+        )
+
