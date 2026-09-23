@@ -3,42 +3,55 @@
 import os
 import asyncio
 import threading
+
+# ============================================================
+# 1. إعداد Event Loop الخيط الرئيسي قبل استيراد Pyrogram
+# ============================================================
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+# ============================================================
+# 2. استيراد Pyrogram بأمان بعد تجهيز الـ Loop
+# ============================================================
 from pyrogram import Client
 from pyrogram.enums import ChatType
 
-# ============================================================
-# Telegram Environment Variables
-# ============================================================
-TG_API_ID = int(os.getenv("TG_API_ID", "0"))
-TG_API_HASH = os.getenv("TG_API_HASH", "")
-TG_SESSION = os.getenv("TELEGRAM_SESSION", "")
+# قراءة متغيرات البيئة
+raw_api_id = os.getenv("TG_API_ID", "0").strip()
+TG_API_ID = int(raw_api_id) if raw_api_id.isdigit() else 0
+TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
+TG_SESSION = os.getenv("TELEGRAM_SESSION", "").strip()
 
-# ============================================================
-# Pyrogram TDLib Client Instance
-# ============================================================
 tg_app = None
-loop = asyncio.new_event_loop()
 
+# ============================================================
+# 3. تشغيل عميل Telegram في الخلفية
+# ============================================================
 if TG_API_ID and TG_API_HASH and TG_SESSION:
-    tg_app = Client(
-        "messenger_tdlib_session",
-        api_id=TG_API_ID,
-        api_hash=TG_API_HASH,
-        session_string=TG_SESSION,
-        in_memory=True
-    )
+    try:
+        tg_app = Client(
+            "messenger_tdlib_session",
+            api_id=TG_API_ID,
+            api_hash=TG_API_HASH,
+            session_string=TG_SESSION,
+            in_memory=True
+        )
 
-    def start_telegram_loop():
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(tg_app.start())
-        loop.run_forever()
+        def start_telegram_loop():
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(tg_app.start())
+                loop.run_forever()
+            except Exception as e:
+                print("TELEGRAM CLIENT START ERROR:", repr(e))
 
-    threading.Thread(target=start_telegram_loop, daemon=True).start()
+        threading.Thread(target=start_telegram_loop, daemon=True).start()
+    except Exception as e:
+        print("TELEGRAM INIT ERROR:", repr(e))
 
-
-# ============================================================
-# User Navigation State
-# ============================================================
 user_states = {}
 PAGE_SIZE = 5
 
@@ -58,12 +71,11 @@ def get_user_state(sender_id):
 
 
 def run_async(coro):
-    return asyncio.run_coroutine_threadsafe(coro, loop).result()
+    if not tg_app or not loop.is_running():
+        raise RuntimeError("حساب Telegram غير متصل أو لم يبدأ بعد.")
+    return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=15)
 
 
-# ============================================================
-# Async Telegram Helpers
-# ============================================================
 async def async_get_dialogs(dialog_type="channels"):
     items = []
     if not tg_app:
@@ -117,56 +129,42 @@ async def async_search_messages(query):
     return results
 
 
-# ============================================================
-# Router Command Handlers
-# ============================================================
 def is_telegram_command(text):
     if not text:
         return False
     cmd = text.strip()
-    
-    # 1. أي نص يبدأ بـ / هو أمر تليجرام حصراً ولن يذهب لـ Gemini
     if cmd.startswith("/"):
         return True
-    
-    # 2. السماح بكتائبة رقم فقط للتنقل في القوائم (مثل 1 أو 2)
     if cmd.isdigit():
         return True
-        
-    # 3. الأوامر الكلاسيكية (اختياري)
     keywords = ["القنوات", "قنوات", "المجموعات", "مجموعات", "المحادثات", "محادثات", "التالي", "السابق"]
     if cmd.lower() in keywords or cmd.lower().startswith("فتح ") or cmd.lower().startswith("بحث "):
         return True
-
     return False
 
 
 def handle_telegram_command(sender_id, text, gemini_response_fn):
     if not tg_app:
-        return "⚠️ حساب Telegram غير مفعل. يرجى التأكد من ضبط متغيرات الجلسة (TELEGRAM_SESSION)."
+        return "⚠️ حساب Telegram غير مفعل. يرجى التأكد من ضبط متغيرات الجلسة (TG_API_ID, TG_API_HASH, TELEGRAM_SESSION)."
 
     state = get_user_state(sender_id)
     raw_cmd = text.strip()
-    
-    # إزالة السلاش / لمعالجة الأمر
     cmd = raw_cmd[1:].strip() if raw_cmd.startswith("/") else raw_cmd
     cmd_lower = cmd.lower()
 
-    # --- أمر المساعدة ---
     if cmd_lower in ["help", "مساعدة", "اوامر", "الأوامر"]:
         return (
             "🤖 **أوامر التحكم في Telegram:**\n\n"
             "🔹 `/channels` أو `/قنوات` - عرض القنوات\n"
             "🔹 `/groups` أو `/مجموعات` - عرض المجموعات\n"
-            "🔹 `/chats` أو `/محادثات` - عرض المحادثات الخاصّة\n"
+            "🔹 `/chats` أو `/محادثات` - عرض المحادثات الخاصة\n"
             "🔹 `/search <كلمة>` أو `/بحث <كلمة>` - البحث في التليجرام\n"
             "🔹 `/open <رقم>` أو `/فتح <رقم>` - قراءة وتحليل رسالة بـ Gemini\n"
-            "🔹 `/next` أو `/التالي` - الصفحة التالية من الرسائل\n"
-            "🔹 `/prev` أو `/السابق` - الصفحة السابقة من الرسائل\n"
+            "🔹 `/next` أو `/التالي` - الصفحة التالية\n"
+            "🔹 `/prev` أو `/السابق` - الصفحة السابقة\n"
             "🔹 أرسل **رقم فقط** (مثل: 1) لفتح العناصر"
         )
 
-    # --- القنوات ---
     if cmd_lower in ["channels", "القنوات", "قنوات"]:
         channels = run_async(async_get_dialogs("channels"))
         state["channels"] = channels
@@ -179,7 +177,6 @@ def handle_telegram_command(sender_id, text, gemini_response_fn):
         res += "\nأرسل رقم القناة للفتح (مثال: 1)"
         return res
 
-    # --- المجموعات ---
     if cmd_lower in ["groups", "المجموعات", "مجموعات"]:
         groups = run_async(async_get_dialogs("groups"))
         state["groups"] = groups
@@ -192,7 +189,6 @@ def handle_telegram_command(sender_id, text, gemini_response_fn):
         res += "\nأرسل رقم المجموعة للفتح (مثال: 1)"
         return res
 
-    # --- المحادثات ---
     if cmd_lower in ["chats", "المحادثات", "محادثات"]:
         chats = run_async(async_get_dialogs("chats"))
         state["chats"] = chats
@@ -205,7 +201,6 @@ def handle_telegram_command(sender_id, text, gemini_response_fn):
         res += "\nأرسل رقم المحادثة للفتح (مثال: 1)"
         return res
 
-    # --- اختيار من القائمة برقم ---
     if cmd.isdigit() and state["state"] in ["VIEWING_CHANNELS", "VIEWING_GROUPS", "VIEWING_CHATS"]:
         idx = int(cmd) - 1
         target = []
@@ -226,7 +221,6 @@ def handle_telegram_command(sender_id, text, gemini_response_fn):
             return format_messages_page(sender_id, selected["title"])
         return "❌ رقم غير صحيح."
 
-    # --- التنقل (التالي / السابق) ---
     if cmd_lower in ["next", "التالي"] and state["state"] == "VIEWING_MESSAGES":
         state["current_page"] += 1
         return format_messages_page(sender_id)
@@ -237,7 +231,6 @@ def handle_telegram_command(sender_id, text, gemini_response_fn):
             return format_messages_page(sender_id)
         return "أنت في الصفحة الأولى بالفعل."
 
-    # --- فتح رسالة وتحليلها بـ Gemini ---
     if (cmd_lower.startswith("open ") or cmd_lower.startswith("فتح ")) and state["state"] == "VIEWING_MESSAGES":
         try:
             parts = cmd.split(" ", 1)
@@ -250,7 +243,6 @@ def handle_telegram_command(sender_id, text, gemini_response_fn):
                 selected_msg = msgs[real_idx]
                 full_text = run_async(async_get_single_message(state["current_chat_id"], selected_msg["id"]))
                 
-                # تحليل النص الجاهز عبر Gemini
                 prompt = f"قم بتحليل وتلخيص النص التالي المستخرج من Telegram بشكل دقيق ومباشر:\n\n{full_text}"
                 ai_summary = gemini_response_fn(sender_id, user_text=prompt)
                 
@@ -259,12 +251,11 @@ def handle_telegram_command(sender_id, text, gemini_response_fn):
         except Exception:
             return "❌ الاستخدام الصحيح: `/open 1` أو `/فتح 1`"
 
-    # --- البحث في Telegram ---
     if cmd_lower.startswith("search ") or cmd_lower.startswith("بحث "):
         parts = cmd.split(" ", 1)
         q = parts[1].strip() if len(parts) > 1 else ""
         if not q:
-            return "❌ يرجى كتابة كلمة للبحث، مثال: `/search pathology` أو `/بحث محاضرات`"
+            return "❌ يرجى كتابة كلمة للبحث، مثال: `/search pathology`"
         results = run_async(async_search_messages(q))
         if not results:
             return f"🔎 لم يتم العثور على نتائج للبحث عن: {q}"
@@ -273,9 +264,8 @@ def handle_telegram_command(sender_id, text, gemini_response_fn):
             res += f"{idx}. [{item['chat_title']}]: {item['text'][:60]}...\n\n"
         return res
 
-    # إذا كانت الرسالة تبدأ بـ / ولكن لم تطابق أي أمر معروف
     if raw_cmd.startswith("/"):
-        return f"❌ الأمر `{raw_cmd}` غير معروف.\n\nأرسل `/help` أو `/أوامر` للتعرف على الأوامر المتاحة."
+        return f"❌ الأمر `{raw_cmd}` غير معروف.\nأرسل `/help` لمشاهدة جميع الأوامر."
 
     return None
 
@@ -297,4 +287,3 @@ def format_messages_page(sender_id, title="المحادثة"):
         res += f"{idx}. {prev}\n"
     res += "\nأرسل:\n- `/open 1` أو `/فتح 1`\n- `/next` أو `/التالي`\n- `/prev` أو `/السابق`"
     return res
-        
