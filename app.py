@@ -3,81 +3,97 @@
 import os
 import time
 import requests
+import threading
 
 from flask import Flask, request
 import google.generativeai as genai
 
 
 # ============================================================
-# Flask Application
+# Flask
 # ============================================================
 
 app = Flask(__name__)
 
 
 # ============================================================
-# Environment Variables - Render
+# Facebook Environment Variables
 # ============================================================
 
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 # ============================================================
-# Settings
+# Gemini API Keys
 # ============================================================
 
-# مدة الذاكرة: 3 ساعات
+GEMINI_API_KEYS = [
+    os.getenv("GEMINI_API_KEY_1"),
+    os.getenv("GEMINI_API_KEY_2"),
+    os.getenv("GEMINI_API_KEY_3"),
+    os.getenv("GEMINI_API_KEY_4"),
+    os.getenv("GEMINI_API_KEY_5")
+]
+
+# إزالة المفاتيح غير الموجودة
+GEMINI_API_KEYS = [
+    key for key in GEMINI_API_KEYS
+    if key
+]
+
+
+if not GEMINI_API_KEYS:
+
+    raise RuntimeError(
+        "No Gemini API keys configured."
+    )
+
+
+# ============================================================
+# Round-Robin State
+# ============================================================
+
+api_index = 0
+
+api_lock = threading.Lock()
+
+
+def get_next_api_key():
+
+    global api_index
+
+    with api_lock:
+
+        key = GEMINI_API_KEYS[api_index]
+
+        api_index = (
+            api_index + 1
+        ) % len(GEMINI_API_KEYS)
+
+        return key
+
+
+# ============================================================
+# Gemini Settings
+# ============================================================
+
 MEMORY_SECONDS = 3 * 60 * 60
 
-# أقصى عدد رسائل محفوظة لكل مستخدم
 MAX_MEMORY_MESSAGES = 30
 
-# أقصى حجم للصورة
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
 
 # ============================================================
-# Gemini
-# ============================================================
-
-genai.configure(
-    api_key=GEMINI_API_KEY
-)
-
-model = genai.GenerativeModel(
-    "gemini-3.7-flash"
-)
-
-
-# ============================================================
-# In-Memory Storage
-#
-# يتم حفظ النصوص والردود فقط.
-# الصور لا يتم حفظها.
-#
-# memory = {
-#     "USER_ID": [
-#         {
-#             "role": "user",
-#             "text": "مرحبا",
-#             "time": 1234567890
-#         },
-#         {
-#             "role": "model",
-#             "text": "مرحبا بك",
-#             "time": 1234567891
-#         }
-#     ]
-# }
+# Python Memory
 # ============================================================
 
 memory = {}
 
 
 # ============================================================
-# Clean Old Memory
+# Memory
 # ============================================================
 
 def clean_memory(sender_id):
@@ -91,26 +107,28 @@ def clean_memory(sender_id):
 
     for item in memory[sender_id]:
 
-        message_time = item.get("time", 0)
+        message_time = item.get(
+            "time",
+            0
+        )
 
-        # الاحتفاظ بالرسائل التي لم تتجاوز 3 ساعات
-        if now - message_time <= MEMORY_SECONDS:
+        if (
+            now - message_time
+            <= MEMORY_SECONDS
+        ):
+
             valid_messages.append(item)
 
-    # الاحتفاظ بآخر 30 رسالة فقط
-    memory[sender_id] = valid_messages[
-        -MAX_MEMORY_MESSAGES:
-    ]
+    memory[sender_id] = (
+        valid_messages[
+            -MAX_MEMORY_MESSAGES:
+        ]
+    )
 
-    # حذف المستخدم إذا لم تعد لديه ذاكرة
     if not memory[sender_id]:
 
         del memory[sender_id]
 
-
-# ============================================================
-# Add Text Message to Memory
-# ============================================================
 
 def add_to_memory(
     sender_id,
@@ -138,10 +156,6 @@ def add_to_memory(
     clean_memory(sender_id)
 
 
-# ============================================================
-# Get Recent Memory
-# ============================================================
-
 def get_memory(sender_id):
 
     clean_memory(sender_id)
@@ -153,10 +167,7 @@ def get_memory(sender_id):
 
 
 # ============================================================
-# Download Facebook Image
-#
-# الصورة تستخدم فقط أثناء الطلب
-# ولا يتم حفظها في memory
+# Download Image
 # ============================================================
 
 def download_image(image_url):
@@ -179,36 +190,28 @@ def download_image(image_url):
 
         image_data = response.content
 
-        # منع الصور الكبيرة جدًا
         if len(image_data) > MAX_IMAGE_SIZE:
 
             print(
-                "IMAGE TOO LARGE:",
-                len(image_data)
+                "IMAGE TOO LARGE"
             )
 
             return None, None
 
-        content_type = response.headers.get(
+        mime_type = response.headers.get(
             "Content-Type",
             "image/jpeg"
         )
 
-        # التأكد من أن الملف صورة
-        if not content_type.startswith(
+        if not mime_type.startswith(
             "image/"
         ):
 
-            print(
-                "INVALID IMAGE TYPE:",
-                content_type
-            )
-
-            return None, None
+            mime_type = "image/jpeg"
 
         return (
             image_data,
-            content_type
+            mime_type
         )
 
     except Exception as e:
@@ -222,7 +225,7 @@ def download_image(image_url):
 
 
 # ============================================================
-# Build Gemini Conversation
+# Build Gemini Context
 # ============================================================
 
 def build_gemini_contents(
@@ -234,10 +237,6 @@ def build_gemini_contents(
 
     contents = []
 
-    # --------------------------------------------------------
-    # تعليمات Gemini
-    # --------------------------------------------------------
-
     contents.append(
         """
 أنت مساعد ذكي داخل Facebook Messenger.
@@ -245,26 +244,21 @@ def build_gemini_contents(
 القواعد:
 
 - أجب باللغة التي يستخدمها المستخدم.
-- استخدم المحادثة السابقة عندما تكون مفيدة للسؤال الحالي.
-- الذاكرة المتاحة هي آخر 3 ساعات فقط.
-- الصور لا يتم الاحتفاظ بها بعد انتهاء معالجة الرسالة.
-- إذا كانت الرسالة الحالية تحتوي على صورة، حلل الصورة الحالية فقط.
-- لا تدّعي رؤية صورة لم يتم إرسالها في الرسالة الحالية.
-- إذا سأل المستخدم عن صورة سابقة، استخدم فقط المعلومات النصية
-  التي تم حفظها من الرد السابق.
+- استخدم المحادثة السابقة عندما تكون مفيدة.
+- الذاكرة المتاحة آخر 3 ساعات فقط.
+- الصور لا يتم حفظها في الذاكرة.
+- إذا كانت هناك صورة حالية، حلل الصورة الحالية فقط.
+- لا تدّعي رؤية صورة سابقة.
+- يمكن استخدام المعلومات النصية المحفوظة عن صورة سابقة.
 - اجعل الإجابة واضحة ومباشرة.
 """
     )
 
     # --------------------------------------------------------
-    # Previous Text Messages
+    # Previous text memory
     # --------------------------------------------------------
 
-    recent_memory = get_memory(
-        sender_id
-    )
-
-    for item in recent_memory:
+    for item in get_memory(sender_id):
 
         role = item.get(
             "role"
@@ -280,17 +274,19 @@ def build_gemini_contents(
         if role == "user":
 
             contents.append(
-                "المستخدم:\n" + text
+                "المستخدم:\n"
+                + text
             )
 
         elif role == "model":
 
             contents.append(
-                "المساعد:\n" + text
+                "المساعد:\n"
+                + text
             )
 
     # --------------------------------------------------------
-    # Current Text
+    # Current text
     # --------------------------------------------------------
 
     if current_text:
@@ -301,10 +297,7 @@ def build_gemini_contents(
         )
 
     # --------------------------------------------------------
-    # Current Image
-    #
-    # الصورة الحالية فقط يتم إرسالها.
-    # لا تدخل إلى memory.
+    # Current image
     # --------------------------------------------------------
 
     if current_image:
@@ -322,14 +315,14 @@ def build_gemini_contents(
 
         contents.append(
             "هذه صورة أرسلها المستخدم الآن. "
-            "حلل الصورة الحالية مع السؤال إن وجد."
+            "حللها مع السؤال الحالي."
         )
 
     return contents
 
 
 # ============================================================
-# Generate Gemini Response
+# Gemini Request
 # ============================================================
 
 def generate_gemini_response(
@@ -339,7 +332,23 @@ def generate_gemini_response(
     mime_type=None
 ):
 
+    api_key = get_next_api_key()
+
+    print(
+        "Gemini API key selected:",
+        GEMINI_API_KEYS.index(api_key) + 1
+    )
+
     try:
+
+        # تهيئة Gemini بالمفتاح المختار
+        genai.configure(
+            api_key=api_key
+        )
+
+        model = genai.GenerativeModel(
+            "gemini-3.7-flash"
+        )
 
         contents = build_gemini_contents(
 
@@ -365,7 +374,7 @@ def generate_gemini_response(
 
         if not reply_text:
 
-            reply_text = (
+            return (
                 "عذراً، لم أتمكن من إنشاء رد."
             )
 
@@ -380,32 +389,27 @@ def generate_gemini_response(
 
         error_text = str(e).upper()
 
-        # ----------------------------------------------------
-        # Rate Limit / Quota
-        # ----------------------------------------------------
-
         if (
             "429" in error_text
-            or "RESOURCE_EXHAUSTED" in error_text
-            or "QUOTA" in error_text
+            or "RESOURCE_EXHAUSTED"
+            in error_text
+            or "QUOTA"
+            in error_text
         ):
 
             return (
-                "تم الوصول إلى حد الطلبات في الوقت الحالي. "
-                "يرجى الانتظار قليلًا ثم إعادة الرسالة."
+                "تم الوصول إلى حد الطلبات "
+                "حاليًا. يرجى الانتظار قليلًا "
+                "ثم إعادة الرسالة."
             )
 
-        # ----------------------------------------------------
-        # Other Gemini errors
-        # ----------------------------------------------------
-
         return (
-            "عذراً، حدث خطأ أثناء معالجة طلبك."
+            "عذراً، حدث خطأ أثناء معالجة الطلب."
         )
 
 
 # ============================================================
-# Send Text Message to Facebook
+# Facebook Send Message
 # ============================================================
 
 def send_facebook_message(
@@ -414,7 +418,6 @@ def send_facebook_message(
 ):
 
     if not text:
-
         return
 
     url = (
@@ -428,7 +431,6 @@ def send_facebook_message(
 
     }
 
-    # تقسيم الرد الطويل
     max_length = 2000
 
     chunks = [
@@ -501,7 +503,7 @@ def send_facebook_message(
 
 
 # ============================================================
-# Home Route
+# Home
 # ============================================================
 
 @app.route(
@@ -517,7 +519,7 @@ def home():
 
 
 # ============================================================
-# Facebook Webhook Verification
+# Webhook Verification
 # ============================================================
 
 @app.route(
@@ -576,36 +578,26 @@ def handle_messages():
             400
         )
 
-    # --------------------------------------------------------
-    # التأكد أن الحدث من Facebook Page
-    # --------------------------------------------------------
-
-    if data.get("object") != "page":
+    if data.get(
+        "object"
+    ) != "page":
 
         return (
             "Not Found",
             404
         )
 
-    # --------------------------------------------------------
-    # Process Entries
-    # --------------------------------------------------------
-
     for entry in data.get(
         "entry",
         []
     ):
 
-        for messaging_event in entry.get(
+        for event in entry.get(
             "messaging",
             []
         ):
 
-            # ------------------------------------------------
-            # Message
-            # ------------------------------------------------
-
-            message = messaging_event.get(
+            message = event.get(
                 "message"
             )
 
@@ -613,18 +605,13 @@ def handle_messages():
 
                 continue
 
-            # تجاهل رسائل البوت نفسه
             if message.get(
                 "is_echo"
             ):
 
                 continue
 
-            # ------------------------------------------------
-            # Sender
-            # ------------------------------------------------
-
-            sender = messaging_event.get(
+            sender = event.get(
                 "sender",
                 {}
             )
@@ -637,17 +624,9 @@ def handle_messages():
 
                 continue
 
-            # ------------------------------------------------
-            # Text
-            # ------------------------------------------------
-
             user_text = message.get(
                 "text"
             )
-
-            # ------------------------------------------------
-            # Attachments
-            # ------------------------------------------------
 
             attachments = message.get(
                 "attachments",
@@ -659,16 +638,14 @@ def handle_messages():
             image_mime_type = None
 
             # ------------------------------------------------
-            # Find Current Image
+            # Current image
             # ------------------------------------------------
 
             for attachment in attachments:
 
-                attachment_type = attachment.get(
+                if attachment.get(
                     "type"
-                )
-
-                if attachment_type != "image":
+                ) != "image":
 
                     continue
 
@@ -689,17 +666,17 @@ def handle_messages():
                     "IMAGE RECEIVED"
                 )
 
-                # تحميل الصورة مؤقتًا
-                image_data, image_mime_type = (
-                    download_image(
-                        image_url
-                    )
+                (
+                    image_data,
+                    image_mime_type
+                ) = download_image(
+                    image_url
                 )
 
                 break
 
             # ------------------------------------------------
-            # Ignore Unsupported Events
+            # Ignore empty events
             # ------------------------------------------------
 
             if (
@@ -729,7 +706,7 @@ def handle_messages():
             )
 
             # ------------------------------------------------
-            # Clean old memory
+            # Clean memory
             # ------------------------------------------------
 
             clean_memory(
@@ -737,7 +714,7 @@ def handle_messages():
             )
 
             # ------------------------------------------------
-            # Generate Gemini Response
+            # Gemini
             # ------------------------------------------------
 
             reply_text = generate_gemini_response(
@@ -753,67 +730,57 @@ def handle_messages():
             )
 
             # ------------------------------------------------
-            # IMPORTANT:
-            #
-            # الصورة لا يتم حفظها.
-            #
-            # فقط النص الذي كتبه المستخدم والرد
-            # من Gemini يتم حفظهما.
+            # Save user text only
             # ------------------------------------------------
 
             if user_text:
 
                 add_to_memory(
 
-                    sender_id=sender_id,
+                    sender_id,
 
-                    role="user",
+                    "user",
 
-                    text=user_text
+                    user_text
 
                 )
 
             elif image_data:
 
-                # إذا أرسل صورة بدون نص
-                # نحفظ وصفًا نصيًا فقط بدل الصورة
-
                 add_to_memory(
 
-                    sender_id=sender_id,
+                    sender_id,
 
-                    role="user",
+                    "user",
 
-                    text="[أرسل المستخدم صورة]"
+                    "[أرسل المستخدم صورة]"
 
                 )
 
             # ------------------------------------------------
-            # Save Gemini Response
+            # Save Gemini response
             # ------------------------------------------------
 
             add_to_memory(
 
-                sender_id=sender_id,
+                sender_id,
 
-                role="model",
+                "model",
 
-                text=reply_text
+                reply_text
 
             )
 
             # ------------------------------------------------
-            # Delete image reference
-            #
-            # حتى لا تبقى في الذاكرة
-            # بعد انتهاء المعالجة.
+            # Delete image from Python variable
             # ------------------------------------------------
 
             image_data = None
+
             image_mime_type = None
 
             # ------------------------------------------------
-            # Send Response
+            # Send reply
             # ------------------------------------------------
 
             send_facebook_message(
@@ -844,9 +811,6 @@ if __name__ == "__main__":
     )
 
     app.run(
-
         host="0.0.0.0",
-
         port=port
-
-    )
+        )
