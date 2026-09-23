@@ -2,10 +2,28 @@
 
 import os
 import asyncio
+import inspect
 import threading
 
 # ============================================================
-# 1. إعداد الـ Event Loop قبل استيراد Pyrogram لتفادي الأخطاء
+# 0. ترقيع (Patch) asyncio.wait لدعم بايثون 3.11+ مع Pyrogram
+# ============================================================
+_original_asyncio_wait = asyncio.wait
+
+async def _patched_asyncio_wait(fs, *args, **kwargs):
+    cleaned_fs = set()
+    for f in fs:
+        if inspect.iscoroutine(f):
+            cleaned_fs.add(asyncio.create_task(f))
+        else:
+            cleaned_fs.add(f)
+    return await _original_asyncio_wait(cleaned_fs, *args, **kwargs)
+
+asyncio.wait = _patched_asyncio_wait
+
+
+# ============================================================
+# 1. إعداد الـ Event Loop لـ MainThread والتأكد من وجوده
 # ============================================================
 try:
     loop = asyncio.get_event_loop()
@@ -13,17 +31,18 @@ except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+
 # ============================================================
-# 2. استيراد Pyrogram
+# 2. استيراد Pyrogram بأمان بعد الترقيع
 # ============================================================
 from pyrogram import Client
 from pyrogram.enums import ChatType
 
-# قراءة متغيرات البيئة
+# قراءة وتنظيف متغيرات البيئة
 raw_api_id = os.getenv("TG_API_ID", "0").strip()
 TG_API_ID = int(raw_api_id) if raw_api_id.isdigit() else 0
-TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
-TG_SESSION = os.getenv("TELEGRAM_SESSION", "").strip()
+TG_API_HASH = os.getenv("TG_API_HASH", "").strip().strip("'").strip('"')
+TG_SESSION = os.getenv("TELEGRAM_SESSION", "").strip().strip("'").strip('"')
 
 tg_app = None
 telegram_ready = False
@@ -82,14 +101,22 @@ def get_user_state(sender_id):
 
 def run_async(coro):
     if not tg_app or not loop.is_running() or not telegram_ready:
-        coro.close()  # إغلاق Coroutine لمنع ظهور تحذير RuntimeWarning
+        if inspect.iscoroutine(coro):
+            try:
+                coro.close()
+            except Exception:
+                pass
         err_msg = telegram_error if telegram_error else "جاري الاتصال بتليجرام..."
         raise RuntimeError(f"حساب Telegram غير متصل. السبب: {err_msg}")
     try:
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         return future.result(timeout=15)
     except Exception as e:
-        coro.close()
+        if inspect.iscoroutine(coro):
+            try:
+                coro.close()
+            except Exception:
+                pass
         raise e
 
 
@@ -305,3 +332,4 @@ def format_messages_page(sender_id, title="المحادثة"):
         res += f"{idx}. {prev}\n"
     res += "\nأرسل:\n- `/open 1` أو `/فتح 1`\n- `/next` أو `/التالي`\n- `/prev` أو `/السابق`"
     return res
+            
