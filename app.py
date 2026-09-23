@@ -347,7 +347,7 @@ def generate_gemini_response(
         )
 
         model = genai.GenerativeModel(
-            "gemini-3.7-flash"
+            "gemini-3.5-flash-lite"
         )
 
         contents = build_gemini_contents(
