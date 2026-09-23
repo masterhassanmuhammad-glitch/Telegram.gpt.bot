@@ -11,14 +11,19 @@ from flask import Flask, request
 # ============================================================
 # Safe Import for Telegram Module
 # ============================================================
+import_error_msg = ""
 try:
     from telegram_client import handle_telegram_command, is_telegram_command
-except Exception as e:
-    print("ERROR IMPORTING TELEGRAM_CLIENT:", repr(e))
+except Exception as err_import:
+    import_error_msg = str(err_import)
+    print("ERROR IMPORTING TELEGRAM_CLIENT:", import_error_msg)
+    
     def is_telegram_command(text):
         return bool(text and text.strip().startswith("/"))
+        
     def handle_telegram_command(s_id, text, gemini_fn):
-        return f"⚠️ وحدة التليجرام غير متوفرة حالياً.\nالسبب: {e}"
+        return f"⚠️ تعذر تحميل وحدة التليجرام.\nالسبب: {import_error_msg}\n\nتأكد من وجود ملف telegram_client.py وتثبيت pyrogram في requirements.txt."
+        
 
 # ملاحظة: استيراد google.generativeai يتم بشكل كسول (lazy import)
 genai = None
