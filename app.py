@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import io
 import time
 import requests
 import threading
@@ -82,7 +83,8 @@ MEMORY_SECONDS = 3 * 60 * 60
 
 MAX_MEMORY_MESSAGES = 30
 
-MAX_IMAGE_SIZE = 10 * 1024 * 1024
+# حد أقصى موحّد لأي ملف يُستقبل (صورة / PDF / DOCX / ...)
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
 
 # ============================================================
@@ -167,61 +169,411 @@ def get_memory(sender_id):
 
 
 # ============================================================
-# Download Image
+# Mime types that Gemini can read natively (inline_data)
 # ============================================================
 
-def download_image(image_url):
+NATIVE_MIME_PREFIXES = (
+    "image/",
+    "audio/",
+    "video/",
+)
+
+NATIVE_MIME_EXACT = {
+    "application/pdf",
+}
+
+# امتدادات نتعرف عليها عندما يكون الـ Content-Type غامض
+# (application/octet-stream مثلاً)
+EXTENSION_MIME_MAP = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".mp4": "video/mp4",
+}
+
+
+def guess_extension_from_url(file_url):
+
+    try:
+
+        path = file_url.split(
+            "?"
+        )[0]
+
+        for ext in EXTENSION_MIME_MAP:
+
+            if path.lower().endswith(ext):
+
+                return ext
+
+    except Exception:
+
+        pass
+
+    return None
+
+
+# ============================================================
+# Download Any File
+# ============================================================
+
+def download_file(file_url):
+    """
+    يحمّل أي مرفق (صورة / صوت / فيديو / PDF / DOCX / PPTX / XLSX / TXT)
+    ويرجع (data_bytes, mime_type) أو (None, None) عند الفشل.
+    """
 
     try:
 
         response = requests.get(
-            image_url,
-            timeout=20
+            file_url,
+            timeout=30
         )
 
         if response.status_code != 200:
 
             print(
-                "IMAGE DOWNLOAD ERROR:",
+                "FILE DOWNLOAD ERROR:",
                 response.status_code
             )
 
             return None, None
 
-        image_data = response.content
+        file_data = response.content
 
-        if len(image_data) > MAX_IMAGE_SIZE:
+        if len(file_data) > MAX_FILE_SIZE:
 
             print(
-                "IMAGE TOO LARGE"
+                "FILE TOO LARGE"
             )
 
             return None, None
 
         mime_type = response.headers.get(
             "Content-Type",
-            "image/jpeg"
-        )
+            ""
+        ).split(";")[0].strip().lower()
 
-        if not mime_type.startswith(
-            "image/"
+        # لو الـ Content-Type غامض أو ناقص، نحاول نستنتجه من امتداد الرابط
+        if (
+            not mime_type
+            or mime_type == "application/octet-stream"
         ):
 
-            mime_type = "image/jpeg"
+            ext = guess_extension_from_url(
+                file_url
+            )
+
+            if ext:
+
+                mime_type = EXTENSION_MIME_MAP[ext]
+
+            else:
+
+                mime_type = "application/octet-stream"
 
         return (
-            image_data,
+            file_data,
             mime_type
         )
 
     except Exception as e:
 
         print(
-            "IMAGE DOWNLOAD ERROR:",
+            "FILE DOWNLOAD ERROR:",
             repr(e)
         )
 
         return None, None
+
+
+# ============================================================
+# Extract Text From Office Documents
+# ============================================================
+
+def extract_text_from_docx(file_data):
+
+    try:
+
+        import docx
+
+        doc = docx.Document(
+            io.BytesIO(file_data)
+        )
+
+        parts = [
+            p.text
+            for p in doc.paragraphs
+            if p.text
+        ]
+
+        for table in doc.tables:
+
+            for row in table.rows:
+
+                row_text = " | ".join(
+                    cell.text
+                    for cell in row.cells
+                )
+
+                if row_text.strip():
+
+                    parts.append(
+                        row_text
+                    )
+
+        return "\n".join(parts).strip()
+
+    except Exception as e:
+
+        print(
+            "DOCX EXTRACT ERROR:",
+            repr(e)
+        )
+
+        return None
+
+
+def extract_text_from_pptx(file_data):
+
+    try:
+
+        from pptx import Presentation
+
+        prs = Presentation(
+            io.BytesIO(file_data)
+        )
+
+        parts = []
+
+        for i, slide in enumerate(
+            prs.slides,
+            start=1
+        ):
+
+            slide_lines = [
+                "-- Slide {} --".format(i)
+            ]
+
+            for shape in slide.shapes:
+
+                if shape.has_text_frame:
+
+                    for para in shape.text_frame.paragraphs:
+
+                        line = "".join(
+                            run.text
+                            for run in para.runs
+                        )
+
+                        if line.strip():
+
+                            slide_lines.append(
+                                line
+                            )
+
+            parts.append(
+                "\n".join(slide_lines)
+            )
+
+        return "\n\n".join(parts).strip()
+
+    except Exception as e:
+
+        print(
+            "PPTX EXTRACT ERROR:",
+            repr(e)
+        )
+
+        return None
+
+
+def extract_text_from_xlsx(file_data):
+
+    try:
+
+        import openpyxl
+
+        wb = openpyxl.load_workbook(
+            io.BytesIO(file_data),
+            data_only=True
+        )
+
+        parts = []
+
+        for sheet in wb.worksheets:
+
+            parts.append(
+                "-- Sheet: {} --".format(
+                    sheet.title
+                )
+            )
+
+            for row in sheet.iter_rows(
+                values_only=True
+            ):
+
+                row_text = " | ".join(
+                    "" if cell is None else str(cell)
+                    for cell in row
+                )
+
+                if row_text.strip(" |"):
+
+                    parts.append(
+                        row_text
+                    )
+
+        return "\n".join(parts).strip()
+
+    except Exception as e:
+
+        print(
+            "XLSX EXTRACT ERROR:",
+            repr(e)
+        )
+
+        return None
+
+
+def extract_text_from_txt(file_data):
+
+    try:
+
+        return file_data.decode(
+            "utf-8",
+            errors="ignore"
+        ).strip()
+
+    except Exception as e:
+
+        print(
+            "TXT EXTRACT ERROR:",
+            repr(e)
+        )
+
+        return None
+
+
+TEXT_EXTRACTORS = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        extract_text_from_docx,
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        extract_text_from_pptx,
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        extract_text_from_xlsx,
+    "text/plain": extract_text_from_txt,
+    "text/csv": extract_text_from_txt,
+}
+
+
+# ============================================================
+# Process One Incoming Attachment
+# ============================================================
+
+def process_attachment(attachment):
+    """
+    يرجع dict فيه واحد من:
+    - {"kind": "native", "data": bytes, "mime_type": str}   -> يُرسل مباشرة لـ Gemini
+    - {"kind": "text", "text": str, "label": str}            -> نص مُستخرج يُرسل كنص
+    - {"kind": "unsupported", "label": str}                  -> نوع غير مدعوم
+    - None لو فشل التحميل
+    """
+
+    attach_type = attachment.get(
+        "type"
+    )
+
+    if attach_type not in (
+        "image",
+        "audio",
+        "video",
+        "file",
+    ):
+
+        return None
+
+    payload = attachment.get(
+        "payload",
+        {}
+    )
+
+    file_url = payload.get(
+        "url"
+    )
+
+    if not file_url:
+
+        return None
+
+    file_data, mime_type = download_file(
+        file_url
+    )
+
+    if not file_data:
+
+        return {
+            "kind": "unsupported",
+            "label": "تعذر تحميل الملف (قد يكون كبيرًا جدًا أو الرابط غير صالح)"
+        }
+
+    # مدعوم مباشرة من Gemini (صور / صوت / فيديو / PDF)
+    if (
+        mime_type in NATIVE_MIME_EXACT
+        or mime_type.startswith(
+            NATIVE_MIME_PREFIXES
+        )
+    ):
+
+        return {
+            "kind": "native",
+            "data": file_data,
+            "mime_type": mime_type
+        }
+
+    # يحتاج استخراج نص (Word / PowerPoint / Excel / نص عادي)
+    extractor = TEXT_EXTRACTORS.get(
+        mime_type
+    )
+
+    if extractor:
+
+        extracted = extractor(
+            file_data
+        )
+
+        if extracted:
+
+            return {
+                "kind": "text",
+                "text": extracted,
+                "label": mime_type
+            }
+
+        return {
+            "kind": "unsupported",
+            "label": "تعذر استخراج محتوى الملف"
+        }
+
+    return {
+        "kind": "unsupported",
+        "label": "نوع الملف غير مدعوم حاليًا ({})".format(
+            mime_type
+        )
+    }
 
 
 # ============================================================
@@ -231,9 +583,12 @@ def download_image(image_url):
 def build_gemini_contents(
     sender_id,
     current_text=None,
-    current_image=None,
-    current_mime_type=None
+    processed_attachments=None
 ):
+
+    processed_attachments = (
+        processed_attachments or []
+    )
 
     contents = []
 
@@ -245,11 +600,10 @@ def build_gemini_contents(
 
 - أجب باللغة التي يستخدمها المستخدم.
 - استخدم المحادثة السابقة عندما تكون مفيدة.
-- الذاكرة المتاحة آخر 3 ساعات فقط.
-- الصور لا يتم حفظها في الذاكرة.
-- إذا كانت هناك صورة حالية، حلل الصورة الحالية فقط.
-- لا تدّعي رؤية صورة سابقة.
-- يمكن استخدام المعلومات النصية المحفوظة عن صورة سابقة.
+- الذاكرة المتاحة آخر 3 ساعات فقط (نصوص فقط، بدون الملفات).
+- إذا كانت هناك ملفات مرفقة حالياً (صورة، صوت، فيديو، PDF، أو نص مستخرج من Word/PowerPoint/Excel)، حلّلها كجزء من الرد.
+- لا تدّعِ رؤية أو قراءة ملف سابق غير موجود الآن.
+- إذا كان الملف غير مدعوم، اعتذر بوضوح واذكر السبب باختصار.
 - اجعل الإجابة واضحة ومباشرة.
 """
     )
@@ -297,26 +651,59 @@ def build_gemini_contents(
         )
 
     # --------------------------------------------------------
-    # Current image
+    # Current attachments
     # --------------------------------------------------------
 
-    if current_image:
+    for item in processed_attachments:
 
-        contents.append({
-
-            "mime_type":
-                current_mime_type
-                or "image/jpeg",
-
-            "data":
-                current_image
-
-        })
-
-        contents.append(
-            "هذه صورة أرسلها المستخدم الآن. "
-            "حللها مع السؤال الحالي."
+        kind = item.get(
+            "kind"
         )
+
+        if kind == "native":
+
+            contents.append({
+
+                "mime_type":
+                    item["mime_type"],
+
+                "data":
+                    item["data"]
+
+            })
+
+            contents.append(
+                "هذا ملف (mime: {}) أرسله المستخدم الآن. "
+                "حلله مع السؤال الحالي.".format(
+                    item["mime_type"]
+                )
+            )
+
+        elif kind == "text":
+
+            contents.append(
+                "محتوى نصي مستخرج من ملف أرسله المستخدم الآن ({}):\n{}".format(
+                    item.get(
+                        "label",
+                        ""
+                    ),
+                    item.get(
+                        "text",
+                        ""
+                    )[:15000]
+                )
+            )
+
+        elif kind == "unsupported":
+
+            contents.append(
+                "ملاحظة: المستخدم أرسل ملفًا لكن حدثت مشكلة: {}".format(
+                    item.get(
+                        "label",
+                        ""
+                    )
+                )
+            )
 
     return contents
 
@@ -328,8 +715,7 @@ def build_gemini_contents(
 def generate_gemini_response(
     sender_id,
     user_text=None,
-    image_data=None,
-    mime_type=None
+    processed_attachments=None
 ):
 
     api_key = get_next_api_key()
@@ -356,9 +742,7 @@ def generate_gemini_response(
 
             current_text=user_text,
 
-            current_image=image_data,
-
-            current_mime_type=mime_type
+            processed_attachments=processed_attachments
 
         )
 
@@ -633,184 +1017,5 @@ def handle_messages():
                 []
             )
 
-            image_data = None
-
-            image_mime_type = None
-
             # ------------------------------------------------
-            # Current image
-            # ------------------------------------------------
-
-            for attachment in attachments:
-
-                if attachment.get(
-                    "type"
-                ) != "image":
-
-                    continue
-
-                payload = attachment.get(
-                    "payload",
-                    {}
-                )
-
-                image_url = payload.get(
-                    "url"
-                )
-
-                if not image_url:
-
-                    continue
-
-                print(
-                    "IMAGE RECEIVED"
-                )
-
-                (
-                    image_data,
-                    image_mime_type
-                ) = download_image(
-                    image_url
-                )
-
-                break
-
-            # ------------------------------------------------
-            # Ignore empty events
-            # ------------------------------------------------
-
-            if (
-                not user_text
-                and not image_data
-            ):
-
-                continue
-
-            print(
-                "================================"
-            )
-
-            print(
-                "SENDER:",
-                sender_id
-            )
-
-            print(
-                "TEXT:",
-                user_text
-            )
-
-            print(
-                "IMAGE:",
-                bool(image_data)
-            )
-
-            # ------------------------------------------------
-            # Clean memory
-            # ------------------------------------------------
-
-            clean_memory(
-                sender_id
-            )
-
-            # ------------------------------------------------
-            # Gemini
-            # ------------------------------------------------
-
-            reply_text = generate_gemini_response(
-
-                sender_id=sender_id,
-
-                user_text=user_text,
-
-                image_data=image_data,
-
-                mime_type=image_mime_type
-
-            )
-
-            # ------------------------------------------------
-            # Save user text only
-            # ------------------------------------------------
-
-            if user_text:
-
-                add_to_memory(
-
-                    sender_id,
-
-                    "user",
-
-                    user_text
-
-                )
-
-            elif image_data:
-
-                add_to_memory(
-
-                    sender_id,
-
-                    "user",
-
-                    "[أرسل المستخدم صورة]"
-
-                )
-
-            # ------------------------------------------------
-            # Save Gemini response
-            # ------------------------------------------------
-
-            add_to_memory(
-
-                sender_id,
-
-                "model",
-
-                reply_text
-
-            )
-
-            # ------------------------------------------------
-            # Delete image from Python variable
-            # ------------------------------------------------
-
-            image_data = None
-
-            image_mime_type = None
-
-            # ------------------------------------------------
-            # Send reply
-            # ------------------------------------------------
-
-            send_facebook_message(
-
-                sender_id,
-
-                reply_text
-
-            )
-
-    return (
-        "EVENT_RECEIVED",
-        200
-    )
-
-
-# ============================================================
-# Main
-# ============================================================
-
-if __name__ == "__main__":
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            5000
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-        )
+            # Process all current
