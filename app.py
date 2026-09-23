@@ -285,8 +285,7 @@ def generate_gemini_response(sender_id, user_text=None, processed_attachments=No
     try:
         client = get_genai_client(api_key)
         contents = build_gemini_contents(sender_id=sender_id, current_text=user_text, processed_attachments=processed_attachments)
-        
-        preferred_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        preferred_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"]
         reply_text = None
 
         for model_name in preferred_models:
