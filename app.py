@@ -7,12 +7,13 @@ import time
 import requests
 import threading
 
-
 # إجبار بايثون على طباعة السجلات فوراً في Render بدون تخزين مؤقت
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, "reconfigure") else None
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 from flask import Flask, request
+from google import genai
+from google.genai import types
 
 # ============================================================
 # Safe Import for Telegram Module
@@ -31,59 +32,15 @@ except Exception as err_import:
         return f"⚠️ تعذر تحميل وحدة التليجرام.\nالسبب: {import_error_msg}"
 
 
-
-from google import genai
 _genai_clients = {}
 _genai_lock = threading.Lock()
+
 
 def get_genai_client(api_key):
     with _genai_lock:
         if api_key not in _genai_clients:
             _genai_clients[api_key] = genai.Client(api_key=api_key)
         return _genai_clients[api_key]
-
-def generate_gemini_response(sender_id, user_text=None, processed_attachments=None):
-    api_key = get_next_api_key() # استخدام دالة تدوير المفاتيح لديك
-
-    if not api_key:
-        return "عذراً، لم يتم ضبط مفاتيح Gemini API."
-
-    try:
-        client = get_genai_client(api_key)
-
-        contents = build_gemini_contents(
-            sender_id=sender_id,
-            current_text=user_text,
-            processed_attachments=processed_attachments
-        )
-
-        # قائمة بأحدث النماذج مرتبة حسب الأفضلية مع fallback تلقائي
-        preferred_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-        
-        reply_text = None
-        for model_name in preferred_models:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents
-                )
-                if response and hasattr(response, "text") and response.text:
-                    reply_text = response.text.strip()
-                    print(f"✅ GEMINI SUCCESS using model: {model_name}", flush=True)
-                    break
-            except Exception as model_err:
-                print(f"⚠️ Model {model_name} failed: {repr(model_err)}. Trying next...", flush=True)
-                continue
-
-        if not reply_text:
-            return "عذراً، لم أتمكن من إنشاء رد عبر الذكاء الاصطناعي."
-
-        return reply_text
-
-    except Exception as e:
-        print(f"❌ GEMINI API CRITICAL ERROR: {repr(e)}", flush=True)
-        return "عذراً، حدث خطأ أثناء معالجة الطلب عبر الذكاء الاصطناعي."
-
 
 
 app = Flask(__name__)
@@ -308,7 +265,12 @@ def build_gemini_contents(sender_id, current_text=None, processed_attachments=No
     for item in processed_attachments:
         kind = item.get("kind")
         if kind == "native":
-            contents.append({"mime_type": item["mime_type"], "data": item["data"]})
+            contents.append(
+                types.Part.from_bytes(
+                    data=item["data"],
+                    mime_type=item["mime_type"]
+                )
+            )
         elif kind == "text":
             contents.append(f"محتوى نصي مستخرج من ملف ({item.get('label', '')}):\n{item.get('text', '')[:15000]}")
 
@@ -321,18 +283,30 @@ def generate_gemini_response(sender_id, user_text=None, processed_attachments=No
         return "عذراً، لم يتم ضبط مفاتيح Gemini API."
 
     try:
-        gen_ai_module = get_genai()
-        gen_ai_module.configure(api_key=api_key)
-        model = gen_ai_module.GenerativeModel("gemini-3.6")
-
+        client = get_genai_client(api_key)
         contents = build_gemini_contents(sender_id=sender_id, current_text=user_text, processed_attachments=processed_attachments)
-        response = model.generate_content(contents)
-        reply_text = getattr(response, "text", None)
+        
+        preferred_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        reply_text = None
+
+        for model_name in preferred_models:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents
+                )
+                if response and hasattr(response, "text") and response.text:
+                    reply_text = response.text.strip()
+                    print(f"✅ GEMINI SUCCESS using model: {model_name}", flush=True)
+                    break
+            except Exception as model_err:
+                print(f"⚠️ Model {model_name} failed: {repr(model_err)}. Trying next...", flush=True)
+                continue
 
         if not reply_text:
             return "عذراً، لم أتمكن من إنشاء رد."
 
-        return reply_text.strip()
+        return reply_text
     except Exception as e:
         print(f"GEMINI ERROR: {repr(e)}", flush=True)
         return "عذراً، حدث خطأ أثناء معالجة الطلب عبر الذكاء الاصطناعي."
@@ -344,10 +318,7 @@ def send_facebook_message(recipient_id, text):
     url = "https://graph.facebook.com/v20.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
     
-    # تصغير حجم الجزء إلى 1000 حرف لتفادي قيود فيسبوك
     max_length = 1000
-    
-    # تنظيف النص كلياً من أي أحرف غريبة قد تعطل فيسبوك
     clean_text = text.encode("utf-8", "ignore").decode("utf-8")
     chunks = [clean_text[i:i + max_length] for i in range(0, len(clean_text), max_length)]
 
@@ -451,3 +422,4 @@ def handle_messages():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    
