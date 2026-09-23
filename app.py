@@ -301,8 +301,13 @@ def send_facebook_message(recipient_id, text):
         return
     url = "https://graph.facebook.com/v20.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
-    max_length = 2000
-    chunks = [text[i:i + max_length] for i in range(0, len(text), max_length)]
+    
+    # تصغير حجم الجزء إلى 1000 حرف لتفادي قيود فيسبوك
+    max_length = 1000
+    
+    # تنظيف النص كلياً من أي أحرف غريبة قد تعطل فيسبوك
+    clean_text = text.encode("utf-8", "ignore").decode("utf-8")
+    chunks = [clean_text[i:i + max_length] for i in range(0, len(clean_text), max_length)]
 
     for chunk in chunks:
         payload = {
