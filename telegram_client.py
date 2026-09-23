@@ -1,58 +1,65 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import asyncio
 import inspect
 import threading
 
 # ============================================================
-# 0. ترقيع (Patch) asyncio.wait لدعم بايثون 3.11+ مع Pyrogram
+# دالة طباعة فورية بدون تخزين مؤقت (تظهر فوراً في سجلات Render)
 # ============================================================
-_original_asyncio_wait = asyncio.wait
+def log(msg):
+    print(msg, flush=True)
 
-async def _patched_asyncio_wait(fs, *args, **kwargs):
-    cleaned_fs = set()
-    for f in fs:
-        if inspect.iscoroutine(f):
-            cleaned_fs.add(asyncio.create_task(f))
-        else:
-            cleaned_fs.add(f)
-    return await _original_asyncio_wait(cleaned_fs, *args, **kwargs)
-
-asyncio.wait = _patched_asyncio_wait
-
+log("⚡ Loading telegram_client.py module...")
 
 # ============================================================
-# 1. إعداد الـ Event Loop لـ MainThread والتأكد من وجوده
-# ============================================================
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-
-# ============================================================
-# 2. استيراد Pyrogram بأمان بعد الترقيع
-# ============================================================
-from pyrogram import Client
-from pyrogram.enums import ChatType
-
 # قراءة وتنظيف متغيرات البيئة
+# ============================================================
 raw_api_id = os.getenv("TG_API_ID", "0").strip()
 TG_API_ID = int(raw_api_id) if raw_api_id.isdigit() else 0
 TG_API_HASH = os.getenv("TG_API_HASH", "").strip().strip("'").strip('"')
 TG_SESSION = os.getenv("TELEGRAM_SESSION", "").strip().strip("'").strip('"')
 
+log(f"🔍 TG_API_ID: {TG_API_ID}")
+log(f"🔍 TG_API_HASH: {'Loaded (' + str(len(TG_API_HASH)) + ' chars)' if TG_API_HASH else 'MISSING'}")
+log(f"🔍 TELEGRAM_SESSION: {'Loaded (' + str(len(TG_SESSION)) + ' chars)' if TG_SESSION else 'MISSING'}")
+
 tg_app = None
+loop = None
 telegram_ready = False
 telegram_error = ""
 
 # ============================================================
-# 3. تشغيل عميل Telegram في الخلفية
+# خيط تشغيل التليجرام المعزول (Worker Thread)
 # ============================================================
-if TG_API_ID and TG_API_HASH and TG_SESSION:
+def run_telegram_worker():
+    global tg_app, loop, telegram_ready, telegram_error
+
+    # 1. إنشاء تعيين Event Loop خاص بهذا الخيط
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # 2. ترقيع asyncio.wait للتوافق مع بايثون 3.11+ في Render
+    _original_wait = asyncio.wait
+    async def _patched_wait(fs, *args, **kwargs):
+        cleaned_fs = set()
+        for f in fs:
+            if inspect.iscoroutine(f):
+                cleaned_fs.add(loop.create_task(f))
+            else:
+                cleaned_fs.add(f)
+        return await _original_wait(cleaned_fs, *args, **kwargs)
+    asyncio.wait = _patched_wait
+
     try:
+        from pyrogram import Client
+        from pyrogram.enums import ChatType
+
+        log("🚀 Initializing Pyrogram Client inside worker thread...")
+        
+        # إنشاء العميل بداخل الخيط والـ Loop المخصص له
         tg_app = Client(
             "messenger_tdlib_session",
             api_id=TG_API_ID,
@@ -61,25 +68,27 @@ if TG_API_ID and TG_API_HASH and TG_SESSION:
             in_memory=True
         )
 
-        def start_telegram_loop():
-            global telegram_ready, telegram_error
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(tg_app.start())
-                telegram_ready = True
-                print("✅ TELEGRAM CLIENT CONNECTED SUCCESSFULLY!")
-                loop.run_forever()
-            except Exception as e:
-                telegram_ready = False
-                telegram_error = str(e)
-                print("❌ TELEGRAM CLIENT START ERROR:", repr(e))
+        async def main_async():
+            global telegram_ready
+            await tg_app.start()
+            telegram_ready = True
+            log("✅ TELEGRAM CLIENT CONNECTED SUCCESSFULLY!")
 
-        threading.Thread(target=start_telegram_loop, daemon=True).start()
+        loop.run_until_complete(main_async())
+        loop.run_forever()
+
     except Exception as e:
+        telegram_ready = False
         telegram_error = str(e)
-        print("❌ TELEGRAM INIT ERROR:", repr(e))
+        log(f"❌ TELEGRAM WORKER ERROR: {repr(e)}")
+
+
+# بدء الخيط في الخلفية عند توفر المفاتيح
+if TG_API_ID and TG_API_HASH and TG_SESSION:
+    threading.Thread(target=run_telegram_worker, daemon=True).start()
 else:
-    telegram_error = "متغيرات البيئة (TG_API_ID, TG_API_HASH, TELEGRAM_SESSION) غير مكتملة."
+    telegram_error = "متغيرات البيئة غير مكتملة (تأكد من إدخال TG_API_ID و TG_API_HASH و TELEGRAM_SESSION في Render)."
+    log(f"⚠️ {telegram_error}")
 
 user_states = {}
 PAGE_SIZE = 5
@@ -100,7 +109,7 @@ def get_user_state(sender_id):
 
 
 def run_async(coro):
-    if not tg_app or not loop.is_running() or not telegram_ready:
+    if not tg_app or not loop or not loop.is_running() or not telegram_ready:
         if inspect.iscoroutine(coro):
             try:
                 coro.close()
@@ -124,6 +133,7 @@ async def async_get_dialogs(dialog_type="channels"):
     items = []
     if not tg_app:
         return items
+    from pyrogram.enums import ChatType
     async for dialog in tg_app.get_dialogs():
         chat = dialog.chat
         if dialog_type == "channels" and chat.type == ChatType.CHANNEL:
@@ -332,4 +342,4 @@ def format_messages_page(sender_id, title="المحادثة"):
         res += f"{idx}. {prev}\n"
     res += "\nأرسل:\n- `/open 1` أو `/فتح 1`\n- `/next` أو `/التالي`\n- `/prev` أو `/السابق`"
     return res
-            
+                               
