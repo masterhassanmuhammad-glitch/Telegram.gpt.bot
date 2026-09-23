@@ -6,42 +6,28 @@ import asyncio
 import inspect
 import threading
 
-# ============================================================
-# دالة طباعة فورية بدون تخزين مؤقت (تظهر فوراً في سجلات Render)
-# ============================================================
 def log(msg):
     print(msg, flush=True)
 
 log("⚡ Loading telegram_client.py module...")
 
-# ============================================================
-# قراءة وتنظيف متغيرات البيئة
-# ============================================================
 raw_api_id = os.getenv("TG_API_ID", "0").strip()
 TG_API_ID = int(raw_api_id) if raw_api_id.isdigit() else 0
 TG_API_HASH = os.getenv("TG_API_HASH", "").strip().strip("'").strip('"')
 TG_SESSION = os.getenv("TELEGRAM_SESSION", "").strip().strip("'").strip('"')
-
-log(f"🔍 TG_API_ID: {TG_API_ID}")
-log(f"🔍 TG_API_HASH: {'Loaded (' + str(len(TG_API_HASH)) + ' chars)' if TG_API_HASH else 'MISSING'}")
-log(f"🔍 TELEGRAM_SESSION: {'Loaded (' + str(len(TG_SESSION)) + ' chars)' if TG_SESSION else 'MISSING'}")
 
 tg_app = None
 loop = None
 telegram_ready = False
 telegram_error = ""
 
-# ============================================================
-# خيط تشغيل التليجرام المعزول (Worker Thread)
-# ============================================================
+
 def run_telegram_worker():
     global tg_app, loop, telegram_ready, telegram_error
 
-    # 1. إنشاء تعيين Event Loop خاص بهذا الخيط
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # 2. ترقيع asyncio.wait للتوافق مع بايثون 3.11+ في Render
     _original_wait = asyncio.wait
     async def _patched_wait(fs, *args, **kwargs):
         cleaned_fs = set()
@@ -55,11 +41,9 @@ def run_telegram_worker():
 
     try:
         from pyrogram import Client
-        from pyrogram.enums import ChatType
 
         log("🚀 Initializing Pyrogram Client inside worker thread...")
         
-        # إنشاء العميل بداخل الخيط والـ Loop المخصص له
         tg_app = Client(
             "messenger_tdlib_session",
             api_id=TG_API_ID,
@@ -83,11 +67,10 @@ def run_telegram_worker():
         log(f"❌ TELEGRAM WORKER ERROR: {repr(e)}")
 
 
-# بدء الخيط في الخلفية عند توفر المفاتيح
 if TG_API_ID and TG_API_HASH and TG_SESSION:
     threading.Thread(target=run_telegram_worker, daemon=True).start()
 else:
-    telegram_error = "متغيرات البيئة غير مكتملة (تأكد من إدخال TG_API_ID و TG_API_HASH و TELEGRAM_SESSION في Render)."
+    telegram_error = "متغيرات البيئة غير مكتملة."
     log(f"⚠️ {telegram_error}")
 
 user_states = {}
@@ -152,34 +135,68 @@ async def async_get_messages(chat_id, limit=20):
     messages = []
     if not tg_app:
         return messages
-    async for msg in tg_app.get_chat_history(chat_id, limit=limit):
-        text_content = msg.text or msg.caption or "[مرفق / وسائط]"
-        messages.append({
-            "id": msg.id,
-            "text": text_content,
-            "date": str(msg.date)
-        })
+    try:
+        async for msg in tg_app.get_chat_history(chat_id, limit=limit):
+            text_content = "[مرفق / وسائط]"
+            # معالجة آمنة للنص لتفادي أخطاء فك التشفير UTF-16
+            try:
+                raw_text = msg.text or msg.caption
+                if raw_text:
+                    text_content = str(raw_text)
+            except Exception:
+                text_content = "[نص غير قابل للقراءة أو يضم رموزاً خاصة]"
+
+            # تنظيف النص من الأحرف المكسورة
+            text_content = text_content.encode("utf-8", "ignore").decode("utf-8")
+
+            messages.append({
+                "id": msg.id,
+                "text": text_content,
+                "date": str(msg.date)
+            })
+    except Exception as e:
+        log(f"⚠️ Error fetching chat history: {e}")
+
     return messages
 
 
 async def async_get_single_message(chat_id, message_id):
     if not tg_app:
         return ""
-    msg = await tg_app.get_messages(chat_id, message_id)
-    return msg.text or msg.caption or "[لا يوجد نص]"
+    try:
+        msg = await tg_app.get_messages(chat_id, message_id)
+        if not msg:
+            return "[الرسالة غير موجودة]"
+        try:
+            raw_text = msg.text or msg.caption or "[لا يوجد نص]"
+            return str(raw_text).encode("utf-8", "ignore").decode("utf-8")
+        except Exception:
+            return "[نص يحتوي على رموز تعذر فك شفرتها]"
+    except Exception as e:
+        return f"[خطأ في جلب الرسالة: {e}]"
 
 
 async def async_search_messages(query):
     results = []
     if not tg_app:
         return results
-    async for msg in tg_app.search_global(query, limit=10):
-        results.append({
-            "chat_title": msg.chat.title if msg.chat else "محادثة",
-            "chat_id": msg.chat.id if msg.chat else None,
-            "msg_id": msg.id,
-            "text": msg.text or msg.caption or "محتوى غير نصي"
-        })
+    try:
+        async for msg in tg_app.search_global(query, limit=10):
+            try:
+                raw_text = msg.text or msg.caption or "محتوى غير نصي"
+                clean_text = str(raw_text).encode("utf-8", "ignore").decode("utf-8")
+            except Exception:
+                clean_text = "[محتوى تعذر فك شفرته]"
+
+            results.append({
+                "chat_title": msg.chat.title if msg.chat else "محادثة",
+                "chat_id": msg.chat.id if msg.chat else None,
+                "msg_id": msg.id,
+                "text": clean_text
+            })
+    except Exception as e:
+        log(f"⚠️ Search error: {e}")
+
     return results
 
 
@@ -342,4 +359,4 @@ def format_messages_page(sender_id, title="المحادثة"):
         res += f"{idx}. {prev}\n"
     res += "\nأرسل:\n- `/open 1` أو `/فتح 1`\n- `/next` أو `/التالي`\n- `/prev` أو `/السابق`"
     return res
-                               
+            
