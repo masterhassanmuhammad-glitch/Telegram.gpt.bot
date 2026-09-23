@@ -281,7 +281,7 @@ def generate_gemini_response(sender_id, user_text=None, processed_attachments=No
     try:
         gen_ai_module = get_genai()
         gen_ai_module.configure(api_key=api_key)
-        model = gen_ai_module.GenerativeModel("gemini-2.5-flash")
+        model = gen_ai_module.GenerativeModel("gemini-3.6")
 
         contents = build_gemini_contents(sender_id=sender_id, current_text=user_text, processed_attachments=processed_attachments)
         response = model.generate_content(contents)
